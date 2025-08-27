@@ -80,15 +80,15 @@ class KubernetesPod:
 
         self.gpu_limit = gpu_limit
         self.restart_policy = restart_policy
-        self.shm_size = (
-            shm_size
-            if shm_size is not None
-            else (
-                ram_request
-                if ram_request is not None
-                else f"{MAX_RAM // (MAX_GPU - gpu_limit + 1)}G"
-            )
-        )
+        # Derive shm_size conservatively when gpu_limit is unset
+        if shm_size is not None:
+            self.shm_size = shm_size
+        elif ram_request is not None:
+            self.shm_size = ram_request
+        elif gpu_limit is not None:
+            self.shm_size = f"{MAX_RAM // (MAX_GPU - gpu_limit + 1)}G"
+        else:
+            self.shm_size = None
         self.secret_env_vars = secret_env_vars
         self.env_vars = env_vars
         self.volume_mounts = volume_mounts

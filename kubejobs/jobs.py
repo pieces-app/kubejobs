@@ -155,6 +155,13 @@ class KubernetesJob:
         self.image = image
         self.command = command
         self.args = args
+        # Accelerator shorthand may define labels and gpu count before we derive cpu/ram defaults
+        if accelerator:
+            accel_labels, accel_count = _parse_accelerator_spec(accelerator)
+            node_selector = {**(node_selector or {}), **accel_labels}
+            if gpu_limit is None:
+                gpu_limit = accel_count
+
         self.cpu_request = cpu_request if cpu_request else 12 * gpu_limit
         self.ram_request = ram_request if ram_request else f"{80 * gpu_limit}G"
         self.storage_request = storage_request
@@ -210,12 +217,6 @@ class KubernetesJob:
         logger.info(f"annotations {self.annotations}")
 
         self.namespace = namespace
-        # Accelerator shorthand overrides/adds node labels and gpu_limit
-        if accelerator:
-            accel_labels, accel_count = _parse_accelerator_spec(accelerator)
-            node_selector = {**(node_selector or {}), **accel_labels}
-            if gpu_limit is None:
-                self.gpu_limit = accel_count
         self.node_selector = node_selector or {}
         self.tolerations = tolerations
         self.affinity = affinity

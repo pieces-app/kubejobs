@@ -4,7 +4,7 @@ import logging
 import os
 import pwd
 import subprocess
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import fire
 import yaml
@@ -123,6 +123,9 @@ class KubernetesJob:
         annotations: Optional[dict] = None,
         namespace: Optional[str] = None,
         image_pull_secret: Optional[str] = None,
+        node_selector: Optional[Dict[str, str]] = None,
+        tolerations: Optional[List[dict]] = None,
+        affinity: Optional[dict] = None,
     ):
         self.name = name
 
@@ -184,6 +187,9 @@ class KubernetesJob:
         logger.info(f"annotations {self.annotations}")
 
         self.namespace = namespace
+        self.node_selector = node_selector or {}
+        self.tolerations = tolerations
+        self.affinity = affinity
 
     def _add_shm_size(self, container: dict):
         """Adds shared memory volume if shm_size is set."""
@@ -340,14 +346,24 @@ class KubernetesJob:
         if self.namespace:
             job["metadata"]["namespace"] = self.namespace
 
+        # Node selection: combine GPU product selector (if provided) with user-provided node_selector
+        combined_node_selector: Dict[str, str] = {}
         if not (
             self.gpu_type is None
             or self.gpu_limit is None
             or self.gpu_product is None
         ):
-            job["spec"]["template"]["spec"]["nodeSelector"] = {
-                f"{self.gpu_type}.product": self.gpu_product
-            }
+            combined_node_selector[f"{self.gpu_type}.product"] = self.gpu_product
+        if self.node_selector:
+            combined_node_selector.update(self.node_selector)
+        if combined_node_selector:
+            job["spec"]["template"]["spec"]["nodeSelector"] = combined_node_selector
+
+        # Optional tolerations/affinity for advanced scheduling
+        if self.tolerations:
+            job["spec"]["template"]["spec"]["tolerations"] = self.tolerations
+        if self.affinity:
+            job["spec"]["template"]["spec"]["affinity"] = self.affinity
         # Add shared memory volume if shm_size is set
         if self.shm_size:
             job["spec"]["template"]["spec"]["volumes"].append(

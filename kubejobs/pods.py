@@ -1,7 +1,7 @@
 import logging
 import os
 import subprocess
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import yaml
 from kubernetes import config
@@ -63,6 +63,9 @@ class KubernetesPod:
         namespace: Optional[str] = None,
         image_pull_secret: Optional[str] = None,
         kueue_queue_name: str = "informatics-user-queue",
+        node_selector: Optional[Dict[str, str]] = None,
+        tolerations: Optional[List[dict]] = None,
+        affinity: Optional[dict] = None,
     ):
         self.name = name
         self.image = image
@@ -116,6 +119,9 @@ class KubernetesPod:
 
         self.namespace = namespace
         self.image_pull_secret = image_pull_secret
+        self.node_selector = node_selector or {}
+        self.tolerations = tolerations
+        self.affinity = affinity
 
     def _add_shm_size(self, container: dict):
         """Adds shared memory volume if shm_size is set."""
@@ -258,14 +264,24 @@ class KubernetesPod:
         if self.namespace:
             pod["metadata"]["namespace"] = self.namespace
 
+        # Node selection: combine GPU product selector (if provided) with user-provided node_selector
+        combined_node_selector: Dict[str, str] = {}
         if not (
             self.gpu_type is None
             or self.gpu_limit is None
             or self.gpu_product is None
         ):
-            pod["spec"]["nodeSelector"] = {
-                f"{self.gpu_type}.product": self.gpu_product
-            }
+            combined_node_selector[f"{self.gpu_type}.product"] = self.gpu_product
+        if self.node_selector:
+            combined_node_selector.update(self.node_selector)
+        if combined_node_selector:
+            pod["spec"]["nodeSelector"] = combined_node_selector
+
+        # Optional tolerations/affinity for advanced scheduling
+        if self.tolerations:
+            pod["spec"]["tolerations"] = self.tolerations
+        if self.affinity:
+            pod["spec"]["affinity"] = self.affinity
 
         # Add shared memory volume if shm_size is set
         if self.shm_size:

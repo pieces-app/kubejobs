@@ -353,11 +353,15 @@ class KubernetesJob:
             or self.gpu_limit is None
             or self.gpu_product is None
         ):
-            combined_node_selector[f"{self.gpu_type}.product"] = self.gpu_product
+            combined_node_selector[f"{self.gpu_type}.product"] = (
+                self.gpu_product
+            )
         if self.node_selector:
             combined_node_selector.update(self.node_selector)
         if combined_node_selector:
-            job["spec"]["template"]["spec"]["nodeSelector"] = combined_node_selector
+            job["spec"]["template"]["spec"][
+                "nodeSelector"
+            ] = combined_node_selector
 
         # Optional tolerations/affinity for advanced scheduling
         if self.tolerations:

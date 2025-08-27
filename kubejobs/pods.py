@@ -271,7 +271,9 @@ class KubernetesPod:
             or self.gpu_limit is None
             or self.gpu_product is None
         ):
-            combined_node_selector[f"{self.gpu_type}.product"] = self.gpu_product
+            combined_node_selector[f"{self.gpu_type}.product"] = (
+                self.gpu_product
+            )
         if self.node_selector:
             combined_node_selector.update(self.node_selector)
         if combined_node_selector:

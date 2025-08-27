@@ -1,10 +1,11 @@
 import grp
+import re
 import json
 import logging
 import os
 import pwd
 import subprocess
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 import fire
 import yaml
@@ -51,6 +52,27 @@ def fetch_user_info():
     )
 
     return user_info
+
+
+def _parse_accelerator_spec(spec: str) -> Tuple[Dict[str, str], int]:
+    """Parse accelerator shorthand like 'h100x1' or 'a100-80x2'.
+
+    Returns (node_selector_labels, gpu_count).
+    Labels follow the convention: {'accel.family': 'h100', 'accel.mem_gb': '80'}
+    """
+    pattern = re.compile(r"^(h100|a100|l4)(?:-(\d+))?x(\d+)$", re.IGNORECASE)
+    m = pattern.match(spec.replace(" ", ""))
+    if not m:
+        raise ValueError(
+            f"Invalid accelerator spec '{spec}'. Expected like 'h100x1' or 'a100-80x2'"
+        )
+    family = m.group(1).lower()
+    mem = m.group(2)
+    count = int(m.group(3))
+    labels: Dict[str, str] = {"accel.family": family}
+    if mem is not None:
+        labels["accel.mem_gb"] = mem
+    return labels, count
 
 
 class GPU_PRODUCT:
@@ -126,6 +148,7 @@ class KubernetesJob:
         node_selector: Optional[Dict[str, str]] = None,
         tolerations: Optional[List[dict]] = None,
         affinity: Optional[dict] = None,
+        accelerator: Optional[str] = None,  # e.g., 'h100x1' or 'a100-80x2'
     ):
         self.name = name
 
@@ -187,6 +210,12 @@ class KubernetesJob:
         logger.info(f"annotations {self.annotations}")
 
         self.namespace = namespace
+        # Accelerator shorthand overrides/adds node labels and gpu_limit
+        if accelerator:
+            accel_labels, accel_count = _parse_accelerator_spec(accelerator)
+            node_selector = {**(node_selector or {}), **accel_labels}
+            if gpu_limit is None:
+                self.gpu_limit = accel_count
         self.node_selector = node_selector or {}
         self.tolerations = tolerations
         self.affinity = affinity

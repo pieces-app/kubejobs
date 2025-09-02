@@ -5,7 +5,7 @@ import logging
 import os
 import pwd
 import subprocess
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any
 
 import fire
 import yaml
@@ -149,6 +149,7 @@ class KubernetesJob:
         tolerations: Optional[List[dict]] = None,
         affinity: Optional[dict] = None,
         accelerator: Optional[str] = None,  # e.g., 'h100x1' or 'a100-80x2'
+        service_account_name: Optional[str] = None,
     ):
         self.name = name
 
@@ -220,6 +221,7 @@ class KubernetesJob:
         self.node_selector = node_selector or {}
         self.tolerations = tolerations
         self.affinity = affinity
+        self.service_account_name = service_account_name
 
     def _add_shm_size(self, container: dict):
         """Adds shared memory volume if shm_size is set."""
@@ -410,6 +412,11 @@ class KubernetesJob:
                 }
             )
 
+        if self.service_account_name:
+            job["spec"]["template"]["spec"][
+                "serviceAccountName"
+            ] = self.service_account_name
+
         # Add volumes for the volume mounts
         if self.volume_mounts:
             for mount_name, mount_data in self.volume_mounts.items():
@@ -421,6 +428,8 @@ class KubernetesJob:
                     }
                 elif "emptyDir" in mount_data:
                     volume["emptyDir"] = {}
+                elif "csi" in mount_data:
+                    volume["csi"] = mount_data["csi"]
                 # Add more volume types here if needed
                 if "server" in mount_data:
                     volume["nfs"] = {
@@ -636,6 +645,151 @@ def create_pv(
     config.load_kube_config()
     core_api = client.CoreV1Api()
     core_api.create_persistent_volume(body=pv)
+
+
+def get_preemptible_gpu_quotas(
+    project_id: str, region: str
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Return preemptible GPU quotas for a project/region.
+
+    Combines service-level (authoritative) quota limits with region-level
+    usage where available. Focuses on metrics matching
+    ``compute.googleapis.com/preemptible_nvidia_*_gpus``.
+
+    Args:
+        project_id: GCP project ID.
+        region: GCP region (e.g., "us-west1").
+
+    Returns:
+        A mapping keyed by service metric name, each value containing:
+        {"region_metric": str, "limit": float|int, "usage": float|None}.
+        ``usage`` may be None when not reported by region-level API.
+    """
+    # 1) Fetch service-level quota infos (limits by dimension)
+    try:
+        svc_proc = subprocess.run(
+            [
+                "gcloud",
+                "beta",
+                "quotas",
+                "info",
+                "list",
+                "--service=compute.googleapis.com",
+                f"--project={project_id}",
+                "--format=json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        service_infos = json.loads(svc_proc.stdout)
+    except subprocess.CalledProcessError as e:
+        logger.info(
+            f"Failed to fetch service-level quotas: returncode={e.returncode} stderr={e.stderr}"
+        )
+        service_infos = []
+    except json.JSONDecodeError:
+        service_infos = []
+
+    results: Dict[str, Dict[str, Optional[float]]] = {}
+
+    # Helper to translate service metric to region-level metric name
+    def to_region_metric_name(service_metric: str) -> str:
+        tail = service_metric.split("/")[
+            -1
+        ]  # e.g., preemptible_nvidia_h100_gpus
+        return "PREEMPTIBLE_" + tail.upper().replace("-", "_")
+
+    # Extract preemptible GPU limits per region from service-level data
+    for info in service_infos:
+        metric = info.get("metric", "")
+        if not (
+            metric.startswith("compute.googleapis.com/preemptible_nvidia_")
+            and metric.endswith("_gpus")
+        ):
+            continue
+
+        dims: List[str] = info.get("dimensions", []) or []
+        if "region" not in dims:
+            continue
+
+        dim_infos: List[Dict[str, Any]] = info.get("dimensionsInfos", []) or []
+        for dim in dim_infos:
+            applicable: List[str] = dim.get("applicableLocations", []) or []
+            details: Dict[str, Any] = dim.get("details", {}) or {}
+            # Only capture the entry relevant to the requested region
+            if region in applicable:
+                raw_value = details.get("value")
+                try:
+                    limit_value = (
+                        float(raw_value) if raw_value is not None else None
+                    )
+                except (TypeError, ValueError):
+                    limit_value = None
+
+                results[metric] = {
+                    "region_metric": to_region_metric_name(metric),
+                    "limit": limit_value,
+                    "usage": None,  # to be filled from region-level call when possible
+                }
+                break
+
+    # 2) Region-level quotas (often contains usage; naming differs)
+    try:
+        reg_proc = subprocess.run(
+            [
+                "gcloud",
+                "compute",
+                "regions",
+                "describe",
+                region,
+                f"--project={project_id}",
+                "--format=json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        region_info = json.loads(reg_proc.stdout)
+    except subprocess.CalledProcessError as e:
+        logger.info(
+            f"Failed to fetch region-level quotas: returncode={e.returncode} stderr={e.stderr}"
+        )
+        region_info = {}
+    except json.JSONDecodeError:
+        region_info = {}
+
+    quotas: List[Dict[str, Any]] = region_info.get("quotas", []) or []
+
+    # Build a reverse index from region_metric -> service_metric
+    region_to_service: Dict[str, str] = {
+        v.get("region_metric", ""): k
+        for k, v in results.items()
+        if v.get("region_metric")
+    }
+
+    for q in quotas:
+        metric_name = q.get("metric")
+        if not metric_name:
+            continue
+        if metric_name in region_to_service:
+            svc_key = region_to_service[metric_name]
+            # Attach usage; if region API also has a limit, trust that too
+            try:
+                if "usage" in q:
+                    results[svc_key]["usage"] = float(q.get("usage", 0.0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                if "limit" in q and results[svc_key].get("limit") in (
+                    None,
+                    -1,
+                ):
+                    results[svc_key]["limit"] = float(q.get("limit"))
+            except (TypeError, ValueError):
+                pass
+
+    return results
 
 
 if __name__ == "__main__":

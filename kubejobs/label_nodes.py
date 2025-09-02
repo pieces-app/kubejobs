@@ -32,6 +32,7 @@ def label_nodes_for_accelerator(
     node_selector: str,
     family: str,
     mem_gb: Optional[int] = None,
+    count: Optional[int] = None,
     overwrite: bool = True,
 ) -> Dict[str, int]:
     """Label nodes matching a selector with accelerator labels.
@@ -41,6 +42,7 @@ def label_nodes_for_accelerator(
             'cloud.google.com/gke-nodepool=gpu-pool'.
         family: Accelerator family shorthand (e.g., 'h100', 'a100', 'l4').
         mem_gb: Optional memory in GB (e.g., 80 for H100 80GB, 40 for A100-40).
+        count: Optional number of accelerators on the node (e.g., 1, 2, 8).
         overwrite: Whether to overwrite existing label values.
 
     Returns:
@@ -65,10 +67,13 @@ def label_nodes_for_accelerator(
         new_labels["accel.family"] = family
         if mem_gb is not None:
             new_labels["accel.mem_gb"] = str(mem_gb)
+        if count is not None:
+            new_labels["accel.count"] = str(count)
 
         if not overwrite and (
             ("accel.family" in labels)
             or (mem_gb is not None and "accel.mem_gb" in labels)
+            or (count is not None and "accel.count" in labels)
         ):
             logger.info(
                 f"[yellow]Skipping[/] {name} (labels exist, overwrite=False)"
@@ -81,6 +86,7 @@ def label_nodes_for_accelerator(
         logger.info(
             f"Labeled node [green]{name}[/] with accel.family={family}"
             + (f", accel.mem_gb={mem_gb}" if mem_gb is not None else "")
+            + (f", accel.count={count}" if count is not None else "")
         )
 
     logger.info(f"Updated [bold]{patch_count}[/] node(s)")

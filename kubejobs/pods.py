@@ -264,18 +264,25 @@ class KubernetesPod:
         if self.namespace:
             pod["metadata"]["namespace"] = self.namespace
 
-        # Node selection: combine GPU product selector (if provided) with user-provided node_selector
+        # Node selection: prefer accel.* labels when present; fallback to gpu product
         combined_node_selector: Dict[str, str] = {}
-        if not (
-            self.gpu_type is None
-            or self.gpu_limit is None
-            or self.gpu_product is None
+        for k in ("accel.family", "accel.mem_gb", "accel.count"):
+            if self.node_selector and k in self.node_selector:
+                combined_node_selector[k] = self.node_selector[k]
+        if (
+            not (
+                self.gpu_type is None
+                or self.gpu_limit is None
+                or self.gpu_product is None
+            )
+            and not combined_node_selector
         ):
             combined_node_selector[f"{self.gpu_type}.product"] = (
                 self.gpu_product
             )
         if self.node_selector:
-            combined_node_selector.update(self.node_selector)
+            for k, v in self.node_selector.items():
+                combined_node_selector.setdefault(k, v)
         if combined_node_selector:
             pod["spec"]["nodeSelector"] = combined_node_selector
 

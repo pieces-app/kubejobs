@@ -162,6 +162,8 @@ class KubernetesJob:
             node_selector = {**(node_selector or {}), **accel_labels}
             if gpu_limit is None:
                 gpu_limit = accel_count
+            if gpu_type is None:
+                gpu_type = "nvidia.com/gpu"
 
         self.cpu_request = cpu_request if cpu_request else 12 * gpu_limit
         self.ram_request = ram_request if ram_request else f"{80 * gpu_limit}G"
@@ -378,18 +380,28 @@ class KubernetesJob:
         if self.namespace:
             job["metadata"]["namespace"] = self.namespace
 
-        # Node selection: combine GPU product selector (if provided) with user-provided node_selector
+        # Node selection: prefer accel.* labels when present; otherwise fallback to gpu product selector
         combined_node_selector: Dict[str, str] = {}
-        if not (
-            self.gpu_type is None
-            or self.gpu_limit is None
-            or self.gpu_product is None
+        # Prefer accel.* labels provided by pools/nodes
+        for k in ("accel.family", "accel.mem_gb", "accel.count"):
+            if self.node_selector and k in self.node_selector:
+                combined_node_selector[k] = self.node_selector[k]
+        # Fallback to GPU product if provided
+        if (
+            not (
+                self.gpu_type is None
+                or self.gpu_limit is None
+                or self.gpu_product is None
+            )
+            and not combined_node_selector
         ):
             combined_node_selector[f"{self.gpu_type}.product"] = (
                 self.gpu_product
             )
+        # Merge any remaining user selectors
         if self.node_selector:
-            combined_node_selector.update(self.node_selector)
+            for k, v in self.node_selector.items():
+                combined_node_selector.setdefault(k, v)
         if combined_node_selector:
             job["spec"]["template"]["spec"][
                 "nodeSelector"

@@ -1,7 +1,7 @@
 import logging
 import os
 import subprocess
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import yaml
 from kubernetes import config
@@ -63,6 +63,9 @@ class KubernetesPod:
         namespace: Optional[str] = None,
         image_pull_secret: Optional[str] = None,
         kueue_queue_name: str = "informatics-user-queue",
+        node_selector: Optional[Dict[str, str]] = None,
+        tolerations: Optional[List[dict]] = None,
+        affinity: Optional[dict] = None,
     ):
         self.name = name
         self.image = image
@@ -77,15 +80,15 @@ class KubernetesPod:
 
         self.gpu_limit = gpu_limit
         self.restart_policy = restart_policy
-        self.shm_size = (
-            shm_size
-            if shm_size is not None
-            else (
-                ram_request
-                if ram_request is not None
-                else f"{MAX_RAM // (MAX_GPU - gpu_limit + 1)}G"
-            )
-        )
+        # Derive shm_size conservatively when gpu_limit is unset
+        if shm_size is not None:
+            self.shm_size = shm_size
+        elif ram_request is not None:
+            self.shm_size = ram_request
+        elif gpu_limit is not None:
+            self.shm_size = f"{MAX_RAM // (MAX_GPU - gpu_limit + 1)}G"
+        else:
+            self.shm_size = None
         self.secret_env_vars = secret_env_vars
         self.env_vars = env_vars
         self.volume_mounts = volume_mounts
@@ -116,6 +119,9 @@ class KubernetesPod:
 
         self.namespace = namespace
         self.image_pull_secret = image_pull_secret
+        self.node_selector = node_selector or {}
+        self.tolerations = tolerations
+        self.affinity = affinity
 
     def _add_shm_size(self, container: dict):
         """Adds shared memory volume if shm_size is set."""
@@ -258,14 +264,33 @@ class KubernetesPod:
         if self.namespace:
             pod["metadata"]["namespace"] = self.namespace
 
-        if not (
-            self.gpu_type is None
-            or self.gpu_limit is None
-            or self.gpu_product is None
+        # Node selection: prefer accel.* labels when present; fallback to gpu product
+        combined_node_selector: Dict[str, str] = {}
+        for k in ("accel.family", "accel.mem_gb", "accel.count"):
+            if self.node_selector and k in self.node_selector:
+                combined_node_selector[k] = self.node_selector[k]
+        if (
+            not (
+                self.gpu_type is None
+                or self.gpu_limit is None
+                or self.gpu_product is None
+            )
+            and not combined_node_selector
         ):
-            pod["spec"]["nodeSelector"] = {
-                f"{self.gpu_type}.product": self.gpu_product
-            }
+            combined_node_selector[f"{self.gpu_type}.product"] = (
+                self.gpu_product
+            )
+        if self.node_selector:
+            for k, v in self.node_selector.items():
+                combined_node_selector.setdefault(k, v)
+        if combined_node_selector:
+            pod["spec"]["nodeSelector"] = combined_node_selector
+
+        # Optional tolerations/affinity for advanced scheduling
+        if self.tolerations:
+            pod["spec"]["tolerations"] = self.tolerations
+        if self.affinity:
+            pod["spec"]["affinity"] = self.affinity
 
         # Add shared memory volume if shm_size is set
         if self.shm_size:
